@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build release
+        shell: cmd
+        run: |
+          if "${{ matrix.arch }}"=="x86" (
+            set CFLAGS=-m32 -target i686-pc-windows-msvc
+          )
+          call build.bat release || exit /b 1
+
+      - name: test
+        shell: cmd
+        run: |
+          if "${{ matrix.arch }}"=="x86" (
+            set CFLAGS=-m32 -target i686-pc-windows-msvc
+          )
+          call run_tests.bat || exit /b 1
+
+      - name: package
+        shell: cmd
+        run: |
+          mkdir dist
+          copy fwd.exe dist\fwd.exe
+          powershell Compress-Archive -Path dist\fwd.exe -DestinationPath fwd-${{ matrix.arch }}.zip
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fwd-${{ matrix.arch }}
+          path: fwd-${{ matrix.arch }}.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            fwd-x64/fwd-x64.zip
+            fwd-x86/fwd-x86.zip

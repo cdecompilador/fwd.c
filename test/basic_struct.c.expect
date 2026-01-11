@@ -1,0 +1,1 @@
+typedef struct Vec2 Vec2;

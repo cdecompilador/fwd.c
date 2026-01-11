@@ -1,0 +1,4 @@
+typedef struct Foo Foo;
+typedef struct Bar Bar;
+static int foo_get(struct Foo *f);
+static float bar_get(struct Bar *b);

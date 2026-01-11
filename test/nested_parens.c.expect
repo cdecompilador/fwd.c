@@ -1,0 +1,1 @@
+static void callback_user(void (*callback)(int, int));

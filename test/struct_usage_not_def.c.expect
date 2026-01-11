@@ -1,0 +1,2 @@
+typedef struct Arena Arena;
+static void use_struct(struct Arena *arena);

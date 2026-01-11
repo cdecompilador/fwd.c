@@ -1,0 +1,1 @@
+static int tricky(int a, int b);
