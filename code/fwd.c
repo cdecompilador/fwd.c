@@ -31,7 +31,8 @@ struct Parser
     b32  prev_was_ident;
 
     i32  func_match_index;
-    i32  struct_match_index;
+    i32  compound_match_index[2];
+    i32  matched_compound;
 
     char output_buffer[PARSER_BUFFER_BYTE_COUNT];
     i32  output_buffer_used;
@@ -59,12 +60,14 @@ parser_init(struct Parser *parser)
     parser->return_state       = PARSE_STATE_SCAN;
     parser->prev_byte          = 0;
     parser->prev_was_ident     = 0;
-    parser->func_match_index   = 0;
-    parser->struct_match_index = 0;
-    parser->output_buffer_used = 0;
-    parser->paren_depth        = 0;
-    parser->name_buffer_used   = 0;
-    parser->brace_depth        = 0;
+    parser->func_match_index      = 0;
+    parser->compound_match_index[0] = 0;
+    parser->compound_match_index[1] = 0;
+    parser->matched_compound      = 0;
+    parser->output_buffer_used    = 0;
+    parser->paren_depth           = 0;
+    parser->name_buffer_used      = 0;
+    parser->brace_depth           = 0;
 }
 
 func void
@@ -85,6 +88,9 @@ name_buffer_push(struct Parser *parser, u8 byte)
     }
 }
 
+global_variable const char *g_keyword_func   = "func";
+global_variable const char *g_keyword_compound[] = {"struct", "enum"};
+
 func void
 emit_func_declaration(struct Parser *parser)
 {
@@ -95,10 +101,12 @@ emit_func_declaration(struct Parser *parser)
 }
 
 func void
-emit_struct_declaration(struct Parser *parser)
+emit_compound_declaration(struct Parser *parser)
 {
     parser->name_buffer[parser->name_buffer_used] = '\0';
-    os_con_write("typedef struct ");
+    os_con_write("typedef ");
+    os_con_write(g_keyword_compound[parser->matched_compound]);
+    os_con_write(" ");
     os_con_write(parser->name_buffer);
     os_con_write(" ");
     os_con_write(parser->name_buffer);
@@ -129,9 +137,6 @@ parser_try_enter_skip(struct Parser *parser, u8 byte, Parse_State caller_state)
     return 0;
 }
 
-global_variable const char g_keyword_func[]   = "func";
-global_variable const char g_keyword_struct[] = "struct";
-
 func void
 parser_feed_byte(struct Parser *parser, u8 byte)
 {
@@ -159,7 +164,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser_feed_byte(parser, byte);
             }
         } break;
-
         case PARSE_STATE_LINE_COMMENT:
         {
             if (byte == '\n')
@@ -167,7 +171,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = parser->return_state;
             }
         } break;
-
         case PARSE_STATE_BLOCK_COMMENT:
         {
             if (byte == '*')
@@ -175,7 +178,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = PARSE_STATE_BLOCK_COMMENT_STAR;
             }
         } break;
-
         case PARSE_STATE_BLOCK_COMMENT_STAR:
         {
             if (byte == '/')
@@ -187,7 +189,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = PARSE_STATE_BLOCK_COMMENT;
             }
         } break;
-
         case PARSE_STATE_STRING:
         {
             if (byte == '\\')
@@ -199,12 +200,10 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = parser->return_state;
             }
         } break;
-
         case PARSE_STATE_STRING_ESCAPE:
         {
             parser->state = PARSE_STATE_STRING;
         } break;
-
         case PARSE_STATE_CHAR_LIT:
         {
             if (byte == '\\')
@@ -216,12 +215,10 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = parser->return_state;
             }
         } break;
-
         case PARSE_STATE_CHAR_LIT_ESCAPE:
         {
             parser->state = PARSE_STATE_CHAR_LIT;
         } break;
-
         case PARSE_STATE_PREPROCESSOR:
         {
             if (byte == '\n' && parser->prev_byte != '\\')
@@ -229,21 +226,22 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->state = PARSE_STATE_SCAN;
             }
         } break;
-
         case PARSE_STATE_SCAN:
         {
             if (byte == '#')
             {
-                parser->state              = PARSE_STATE_PREPROCESSOR;
-                parser->func_match_index   = 0;
-                parser->struct_match_index = 0;
+                parser->state                   = PARSE_STATE_PREPROCESSOR;
+                parser->func_match_index        = 0;
+                parser->compound_match_index[0] = 0;
+                parser->compound_match_index[1] = 0;
                 break;
             }
 
             if (parser_try_enter_skip(parser, byte, PARSE_STATE_SCAN))
             {
-                parser->func_match_index   = 0;
-                parser->struct_match_index = 0;
+                parser->func_match_index        = 0;
+                parser->compound_match_index[0] = 0;
+                parser->compound_match_index[1] = 0;
                 break;
             }
 
@@ -263,11 +261,12 @@ parser_feed_byte(struct Parser *parser, u8 byte)
             }
             else if (parser->func_match_index == 4 && !current_is_ident)
             {
-                parser->state              = PARSE_STATE_COLLECT_FUNC;
-                parser->output_buffer_used = 0;
-                parser->paren_depth        = 0;
-                parser->func_match_index   = 0;
-                parser->struct_match_index = 0;
+                parser->state                   = PARSE_STATE_COLLECT_FUNC;
+                parser->output_buffer_used      = 0;
+                parser->paren_depth             = 0;
+                parser->func_match_index        = 0;
+                parser->compound_match_index[0] = 0;
+                parser->compound_match_index[1] = 0;
                 parser_feed_byte(parser, byte);
                 return;
             }
@@ -280,38 +279,43 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 }
             }
 
-            if (parser->struct_match_index < 6 &&
-                byte == (u8)g_keyword_struct[parser->struct_match_index])
+            for (i32 k = 0; k < 2; k++)
             {
-                if (parser->struct_match_index == 0 && parser->prev_was_ident)
+                if (g_keyword_compound[k][parser->compound_match_index[k]] != '\0' &&
+                    byte == (u8)g_keyword_compound[k][parser->compound_match_index[k]])
                 {
-                    parser->struct_match_index = 0;
+                    if (parser->compound_match_index[k] == 0 && parser->prev_was_ident)
+                    {
+                        parser->compound_match_index[k] = 0;
+                    }
+                    else
+                    {
+                        parser->compound_match_index[k]++;
+                    }
+                }
+                else if (g_keyword_compound[k][parser->compound_match_index[k]] == '\0' &&
+                         !current_is_ident)
+                {
+                    parser->state                   = PARSE_STATE_COLLECT_STRUCT_NAME;
+                    parser->name_buffer_used        = 0;
+                    parser->func_match_index        = 0;
+                    parser->compound_match_index[0] = 0;
+                    parser->compound_match_index[1] = 0;
+                    parser->matched_compound        = k;
+                    break;
                 }
                 else
                 {
-                    parser->struct_match_index++;
-                }
-            }
-            else if (parser->struct_match_index == 6 && !current_is_ident)
-            {
-                parser->state              = PARSE_STATE_COLLECT_STRUCT_NAME;
-                parser->name_buffer_used   = 0;
-                parser->func_match_index   = 0;
-                parser->struct_match_index = 0;
-                break;
-            }
-            else
-            {
-                parser->struct_match_index = 0;
-                if (!parser->prev_was_ident && byte == (u8)g_keyword_struct[0])
-                {
-                    parser->struct_match_index = 1;
+                    parser->compound_match_index[k] = 0;
+                    if (!parser->prev_was_ident && byte == (u8)g_keyword_compound[k][0])
+                    {
+                        parser->compound_match_index[k] = 1;
+                    }
                 }
             }
 
             parser->prev_was_ident = current_is_ident;
         } break;
-
         case PARSE_STATE_COLLECT_FUNC:
         {
             if (parser_try_enter_skip(parser, byte, PARSE_STATE_COLLECT_FUNC))
@@ -348,7 +352,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 parser->brace_depth = 0;
             }
         } break;
-
         case PARSE_STATE_COLLECT_STRUCT_NAME:
         {
             if (byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r')
@@ -392,7 +395,6 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 name_buffer_push(parser, byte);
             }
         } break;
-
         case PARSE_STATE_SKIP_BODY:
         {
             if (parser_try_enter_skip(parser, byte, PARSE_STATE_SKIP_BODY))
@@ -411,7 +413,7 @@ parser_feed_byte(struct Parser *parser, u8 byte)
                 {
                     if (parser->name_buffer_used > 0)
                     {
-                        emit_struct_declaration(parser);
+                        emit_compound_declaration(parser);
                     }
                     parser->name_buffer_used = 0;
                     parser->state            = PARSE_STATE_SCAN;
@@ -424,7 +426,8 @@ parser_feed_byte(struct Parser *parser, u8 byte)
     parser->prev_byte = byte;
 }
 
-int main(void)
+int 
+main(void)
 {
     struct Arena arena = {0};
 
