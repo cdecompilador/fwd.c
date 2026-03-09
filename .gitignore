@@ -1,4 +1,5 @@
 fwd.exe
 fwd.pdb
 pdb.ilk
+*.rdi
 tags

@@ -1,17 +1,17 @@
 @echo off
 
 if "%1"=="release" (
-    clang %CFLAGS% -Os -Wall -Wextra ^
+    clang %CFLAGS% -Os -Wall -Wextra -std=c11 ^
         -fno-asynchronous-unwind-tables -fno-ident ^
         -Icode ^
         -lkernel32 -luser32 ^
         -Wl,/ENTRY:main,/SUBSYSTEM:CONSOLE,/MERGE:.rdata=.text,/MERGE:.pdata=.text,/OPT:REF,/OPT:ICF ^
-        code/fwd.c -o fwd.exe
+        code/win32_fwd.c -o fwd.exe
 ) else (
-    clang %CFLAGS% -g -Wall -Wextra ^
+    clang %CFLAGS% -g -Wall -Wextra -std=c11 ^
         -Icode ^
         -lkernel32 -luser32 ^
         -Wl,/ENTRY:main,/SUBSYSTEM:CONSOLE,/DEBUG,/PDB:fwd.pdb ^
-        -DFWD_DEBUG ^
-        code/fwd.c -o fwd.exe
+        -DDEBUG ^
+        code/win32_fwd.c -o fwd.exe
 )
