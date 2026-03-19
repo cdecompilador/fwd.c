@@ -9,15 +9,106 @@
 global_variable struct Arena g_win32_arena;
 global_variable CRITICAL_SECTION g_win32_entity_mutex;
 
+typedef BOOL (WINAPI *InitializeSynchronizationBarrier_t)(LPSYNCHRONIZATION_BARRIER, LONG, LONG);
+typedef BOOL (WINAPI *EnterSynchronizationBarrier_t)(LPSYNCHRONIZATION_BARRIER, DWORD);
+typedef BOOL (WINAPI *DeleteSynchronizationBarrier_t)(LPSYNCHRONIZATION_BARRIER);
+
+struct Win32_Legacy_Barrier
+{
+	CRITICAL_SECTION cs;
+	CONDITION_VARIABLE cv;
+	LONG total_count;
+	LONG waiting_count;
+	LONG generation;
+};
+
+func BOOL WINAPI
+legacy_barrier_init(LPSYNCHRONIZATION_BARRIER barrier_storage, LONG count, LONG spin_count)
+{
+	(void)spin_count;
+	struct Win32_Legacy_Barrier *legacy_barrier = (struct Win32_Legacy_Barrier *)barrier_storage;
+	InitializeCriticalSection(&legacy_barrier->cs);
+	InitializeConditionVariable(&legacy_barrier->cv);
+	legacy_barrier->total_count = count;
+	legacy_barrier->waiting_count = 0;
+	legacy_barrier->generation = 0;
+	return TRUE;
+}
+
+func BOOL WINAPI
+legacy_barrier_enter(LPSYNCHRONIZATION_BARRIER barrier_storage, DWORD flags)
+{
+	(void)flags;
+	struct Win32_Legacy_Barrier *legacy_barrier = (struct Win32_Legacy_Barrier *)barrier_storage;
+	EnterCriticalSection(&legacy_barrier->cs);
+	LONG current_gen = legacy_barrier->generation;
+	legacy_barrier->waiting_count++;
+	if (legacy_barrier->waiting_count >= legacy_barrier->total_count)
+	{
+		legacy_barrier->waiting_count = 0;
+		legacy_barrier->generation++;
+		WakeAllConditionVariable(&legacy_barrier->cv);
+		LeaveCriticalSection(&legacy_barrier->cs);
+		return TRUE;
+	}
+	while (legacy_barrier->generation == current_gen)
+		SleepConditionVariableCS(&legacy_barrier->cv, &legacy_barrier->cs, INFINITE);
+	LeaveCriticalSection(&legacy_barrier->cs);
+	return FALSE;
+}
+
+func BOOL WINAPI
+legacy_barrier_delete(LPSYNCHRONIZATION_BARRIER barrier_storage, ...)
+{
+	struct Win32_Legacy_Barrier *legacy_barrier = (struct Win32_Legacy_Barrier *)barrier_storage;
+	DeleteCriticalSection(&legacy_barrier->cs);
+	return TRUE;
+}
+
+global_variable b32 g_win32_legacy_barrier = 1;
+global_variable InitializeSynchronizationBarrier_t win32_barrier_init  = legacy_barrier_init;
+global_variable EnterSynchronizationBarrier_t      win32_barrier_enter = legacy_barrier_enter;
+global_variable DeleteSynchronizationBarrier_t     win32_barrier_delete = (DeleteSynchronizationBarrier_t)legacy_barrier_delete;
+
+struct Win32_Entity
+{
+	SYNCHRONIZATION_BARRIER native_barrier;
+	struct Win32_Legacy_Barrier legacy_barrier;
+	CRITICAL_SECTION mutex;
+	HANDLE hFile;
+	b32 is_win7;
+};
+
+func void
+win32_load_functions(void)
+{
+	HMODULE kernel32_module = GetModuleHandleA("kernel32.dll");
+	InitializeSynchronizationBarrier_t init_fn = (InitializeSynchronizationBarrier_t)
+		GetProcAddress(kernel32_module, "InitializeSynchronizationBarrier");
+	if (init_fn)
+	{
+		g_win32_legacy_barrier = 0;
+		win32_barrier_init = init_fn;
+		win32_barrier_enter = (EnterSynchronizationBarrier_t)
+			GetProcAddress(kernel32_module, "EnterSynchronizationBarrier");
+		win32_barrier_delete = (DeleteSynchronizationBarrier_t)
+			GetProcAddress(kernel32_module, "DeleteSynchronizationBarrier");
+	}
+}
+
 func void
 os_win32_initialize()
 {
+	win32_load_functions();
 	InitializeCriticalSection(&g_win32_entity_mutex);
 
 	g_win32_arena.reserved   = g_page_size;
 	g_win32_arena.committed  = g_page_size;
 	g_win32_arena.base_address = os_mem_reserve(0, g_page_size);
 	os_mem_commit(g_win32_arena.base_address, g_page_size);
+#ifdef DEBUG
+	g_win32_arena.debug_owner_lane = (u32)-1;
+#endif
 }
 
 func void*
@@ -177,12 +268,15 @@ os_exit(u64 code)
 	ExitProcess(code);
 }
 
-struct Win32_Entity
+
+
+func LPSYNCHRONIZATION_BARRIER
+win32_entity_barrier_ptr(struct Win32_Entity *entity)
 {
-	SYNCHRONIZATION_BARRIER barrier;
-	CRITICAL_SECTION mutex;
-	HANDLE hFile;
-};
+	if (g_win32_legacy_barrier)
+		return (LPSYNCHRONIZATION_BARRIER)&entity->legacy_barrier;
+	return &entity->native_barrier;
+}
 
 func OS_Barrier
 os_barrier_alloc(u64 count)
@@ -191,7 +285,7 @@ os_barrier_alloc(u64 count)
 		struct Win32_Entity *result = push_struct(&g_win32_arena, struct Win32_Entity);
 	LeaveCriticalSection(&g_win32_entity_mutex);
 
-	InitializeSynchronizationBarrier(&result->barrier, count, -1);
+	win32_barrier_init(win32_entity_barrier_ptr(result), (LONG)count, -1);
 
 	return (OS_Barrier)(usize)result;
 }
@@ -204,7 +298,7 @@ os_barrier_wait(OS_Barrier barrier)
 	struct Win32_Entity *win32_entity = (struct Win32_Entity *)(void *)barrier;
 	if (win32_entity != 0)
 	{
-		EnterSynchronizationBarrier(&win32_entity->barrier, 0);
+		win32_barrier_enter(win32_entity_barrier_ptr(win32_entity), 0);
 	}
 }
 
@@ -266,7 +360,7 @@ os_barrier_release(OS_Barrier barrier)
 	struct Win32_Entity *win32_entity = (struct Win32_Entity *)(void *)barrier;
 	if (win32_entity != 0)
 	{
-		DeleteSynchronizationBarrier(&win32_entity->barrier);
+		win32_barrier_delete(win32_entity_barrier_ptr(win32_entity));
 		/* TODO(cdecompilador): Release entity */
 #ifdef DEBUG
 		mem_clear((void *)win32_entity, sizeof(*win32_entity));
@@ -277,32 +371,35 @@ os_barrier_release(OS_Barrier barrier)
 #include "base.c"
 #include "fwd.c"
 
+struct Worker_Args
+{
+	u32 lane_index;
+	char **input_filenames;
+	usize input_files_count;
+};
+
 func DWORD
 win32_worker_thread(LPVOID lp_param)
 {
-	u32 idx = (u32)(usize)lp_param;
-	tc_initialize(idx);
+	struct Worker_Args *args = (struct Worker_Args *)lp_param;
+	tc_initialize(args->lane_index);
 
-	startup();
+	startup(args->input_filenames, args->input_files_count);
 	return 0;
 }
 
 int
 main(void)
 {
-	g_shared_memory = os_mem_reserve(0, shared_memory_size);
-	os_mem_commit(g_shared_memory, shared_memory_size);
-	init_shared_memory();
-
-	os_parse_cmdline(&shared_memory()->arena,
-			&shared_memory()->input_filenames,
-			&shared_memory()->input_files_count);
-
 	SYSTEM_INFO sysinfo;
 	GetSystemInfo(&sysinfo);
 	DWORD cpu_count = sysinfo.dwNumberOfProcessors;
 
 	os_win32_initialize();
+
+	char **input_filenames;
+	usize input_files_count;
+	os_parse_cmdline(&g_win32_arena, &input_filenames, &input_files_count);
 
 	g_broadcast_memory = os_mem_reserve(0, max_broadcast_size);
 	os_mem_commit(g_broadcast_memory, max_broadcast_size);
@@ -311,10 +408,14 @@ main(void)
 	g_lane_count = (u32)cpu_count;
 	g_barrier = os_barrier_alloc(cpu_count);
 
+	struct Worker_Args *worker_args = push_array(&g_win32_arena, struct Worker_Args, cpu_count);
 	HANDLE *threads = push_array(&g_win32_arena, HANDLE, cpu_count);
 	for (DWORD i = 0; i < cpu_count; i++)
 	{
-		threads[i] = CreateThread(0, 0, win32_worker_thread, (LPVOID)(usize)i, 0, 0);
+		worker_args[i].lane_index = (u32)i;
+		worker_args[i].input_filenames = input_filenames;
+		worker_args[i].input_files_count = input_files_count;
+		threads[i] = CreateThread(0, 0, win32_worker_thread, &worker_args[i], 0, 0);
 	}
 
 	WaitForMultipleObjects(cpu_count, threads, TRUE, INFINITE);

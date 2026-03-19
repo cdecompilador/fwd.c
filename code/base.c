@@ -1,5 +1,9 @@
 #define big_arena_default_reserve mb(16)
 
+/* NOTE(cdecompilador): Declared early so _arena_push can reference it for the
+ * debug lane-affinity check. Defined properly in the thread-local section below. */
+local_variable u32 l_lane_index = !0;
+
 #ifdef DEBUG
 void *g_big_arena_base_address = (void*)0xFFFF00;
 #else
@@ -71,6 +75,7 @@ init_big_arena()
 	 * such that the next large arena doen't try to use it */
 #ifdef DEBUG
 	mem_clear(result.base_address, g_page_size);
+	result.debug_owner_lane = (u32)-1;
 	if (g_big_arena_base_address != 0) g_big_arena_base_address += big_arena_default_reserve;
 #endif
 
@@ -80,6 +85,18 @@ init_big_arena()
 func void *
 _arena_push(struct Arena *arena, usize size, usize alignment, b32 clear_to_zero)
 {
+#ifdef DEBUG
+	if (arena->debug_owner_lane != (u32)-1 && arena->debug_owner_lane != l_lane_index)
+	{
+		os_con_write("Lane affinity violation: arena owned by lane ");
+		os_con_write_u32(arena->debug_owner_lane);
+		os_con_write(" but pushed from lane ");
+		os_con_write_u32(l_lane_index);
+		os_con_write("\n");
+		os_exit(0);
+	}
+#endif
+
 	b32 is_big_arena = arena->reserved != arena->committed;
 
     usize aligned_used = align_forward_usize(arena->used, alignment);
@@ -139,7 +156,8 @@ func void
 temp_arena_release(struct Temp_Arena ta)
 {
 #ifdef DEBUG
-	mem_clear(ta.arena->base_address + ta.saved_used, ta.arena->used - ta.saved_used);
+	if (ta.arena->used > ta.saved_used)
+		mem_clear(ta.arena->base_address + ta.saved_used, ta.arena->used - ta.saved_used);
 #endif
     ta.arena->used = ta.saved_used;
 }
@@ -154,9 +172,7 @@ push_string(struct Arena *arena, char *str)
 		str_len++;
 		ptr++;
 	}
-
 	char *target_buf = push_array(arena, char, str_len);
-
 	memcpy(target_buf, str, str_len);
 
 	return target_buf;
@@ -169,7 +185,7 @@ push_string(struct Arena *arena, char *str)
 
 local_variable struct Arena _l_scratch_arenas[scratch_arena_count];
 local_variable b32 _l_in_use_arenas[scratch_arena_count];
-local_variable u32 l_lane_index = !0;
+/* NOTE(cdecompilador): l_lane_index declared at top of file for early use in _arena_push */
 global_variable void *g_broadcast_memory;
 global_variable OS_Barrier g_barrier;
 global_variable u32 g_lane_count;
@@ -180,7 +196,8 @@ global_variable u32 g_lane_count;
 #define lane_index() l_lane_index
 #define lane_sync() tc_lane_barrier_wait(0, 0, 0)
 #define lane_count() g_lane_count
-#define lane_sync_u64(ptr, src_lane_index) tc_lane_barrier_wait((ptr), sizeof(*(ptr)), (src_lane_index))
+#define lane_sync_u64(ptr, src_lane_index) tc_lane_barrier_wait((ptr), sizeof(u64), (src_lane_index))
+#define lane_sync_ptr(ptr, src_lane_index) tc_lane_barrier_wait((ptr), sizeof(*(ptr)), (src_lane_index))
 
 /* NOTE(cdecompilador): useful function to distribute splitable loads of work between lanes */
 func void lane_range(usize work_values_count, usize *range_start, usize *range_end)
@@ -228,6 +245,9 @@ tc_get_scratch_arena()
 			}
 
 			_l_in_use_arenas[arena_index] = 1;
+#ifdef DEBUG
+			_l_scratch_arenas[arena_index].debug_owner_lane = l_lane_index;
+#endif
 			return &_l_scratch_arenas[arena_index];
 		}
 	}
@@ -278,7 +298,7 @@ tc_lane_barrier_wait(void *broadcast_ptr, u64 broadcast_size, u64 broadcast_src_
 
 	os_barrier_wait(g_barrier);
 
-	/* NOTE(cdecompilador): If other thread is goind the broadcast we cpy -> broadcast_ptr */
+	/* NOTE(cdecompilador): If other thread is doing the broadcast we cpy -> broadcast_ptr */
 	if (broadcast_ptr != 0 && l_lane_index != broadcast_src_lane_index)
 	{
 		memcpy(broadcast_ptr, g_broadcast_memory, broadcast_size);

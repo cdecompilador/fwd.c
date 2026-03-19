@@ -39,5 +39,23 @@ for %%f in (test\*.c) do (
 if exist test\__actual.tmp del test\__actual.tmp
 
 echo.
+echo === Unit Tests ===
+clang  -g -Wall -Wextra -Wno-unused -std=c11 -DUNIT_TEST -DDEBUG -Icode test\unit_tests.c -o test\unit_tests.exe 2>&1
+if errorlevel 1 (
+    echo UNIT TEST BUILD FAILED
+    set /a FAIL+=1
+    set /a TOTAL+=1
+) else (
+    set /a TOTAL+=1
+    test\unit_tests.exe
+    if errorlevel 1 (
+        set /a FAIL+=1
+    ) else (
+        set /a PASS+=1
+    )
+)
+if exist test\unit_tests.exe del test\unit_tests.exe
+
+echo.
 echo %PASS%/%TOTAL% passed, %FAIL% failed
 if %FAIL% gtr 0 exit /b 1

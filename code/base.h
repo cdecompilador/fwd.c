@@ -1,10 +1,17 @@
 #include <stdint.h>
+#include <string.h>
+#ifndef UNIT_TEST
 #include <intrin.h>
+#endif
 
 #define func static
 #define internal static
 #define global_variable static
+#ifdef UNIT_TEST
+#define local_variable static
+#else
 #define local_variable _Thread_local static
+#endif
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -31,24 +38,6 @@ typedef u32      b32;
  * easy to see in the debugger */
 #define magic_debug_byte 0xCD
 
-/* Minimal memset — needed because we have no CRT and compilers emit memset calls for struct 
- * zero-initialization like `= {0}`. */
-#pragma function(memset)
-void *memset(void *dest, int value, usize count)
-{
-    u8 *d = (u8 *)dest;
-    while (count--) *d++ = (u8)value;
-    return dest;
-}
-
-#pragma function(memcpy)
-void *memcpy(void *dest, const void *src, usize count)
-{
-    u8 *d = (u8 *)dest;
-    const u8 *s = (const u8 *)src;
-    while (count--) *d++ = *s++;
-    return dest;
-}
 
 func void mem_zero(void *src, usize size);
 func void mem_clear(void *src, usize size);
@@ -76,6 +65,10 @@ struct Arena
     usize  committed;
     usize  used;
     u8    *base_address;
+#ifdef DEBUG
+	/* NOTE(cdecompilador): (u32)-1 = no lane affinity, otherwise only this lane may push */
+    u32    debug_owner_lane; 
+#endif
 };
 
 func void *_arena_push(struct Arena *arena, usize size, usize alignment, b32 clear_to_zero);
@@ -105,9 +98,11 @@ func struct Arena     *tc_get_scratch_arena(void);
 func void			   tc_release_scratch_arena(struct Arena *);
 func void              tc_lane_barrier_wait(void *broadcast_ptr, u64 broadcast_size, u64 broadcast_src_lane_index);
 
+#ifndef UNIT_TEST
 #define atomic_add_i64(ptr, val) _InterlockedExchangeAdd64((volatile i64*)(ptr), (val))
+#endif
 
-func void lane_range(u64 work_values_count, u64 *range_start, u64 *range_end);
+func void lane_range(usize work_values_count, usize *range_start, usize *range_end);
 
 #define stack_push_n(first, node, next) \
     ((node)->next = (first), (first) = (node))
