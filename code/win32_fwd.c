@@ -58,7 +58,7 @@ legacy_barrier_enter(LPSYNCHRONIZATION_BARRIER barrier_storage, DWORD flags)
 }
 
 func BOOL WINAPI
-legacy_barrier_delete(LPSYNCHRONIZATION_BARRIER barrier_storage, ...)
+legacy_barrier_delete(LPSYNCHRONIZATION_BARRIER barrier_storage)
 {
 	struct Win32_Legacy_Barrier *legacy_barrier = (struct Win32_Legacy_Barrier *)barrier_storage;
 	DeleteCriticalSection(&legacy_barrier->cs);
@@ -68,7 +68,7 @@ legacy_barrier_delete(LPSYNCHRONIZATION_BARRIER barrier_storage, ...)
 global_variable b32 g_win32_legacy_barrier = 1;
 global_variable InitializeSynchronizationBarrier_t win32_barrier_init  = legacy_barrier_init;
 global_variable EnterSynchronizationBarrier_t      win32_barrier_enter = legacy_barrier_enter;
-global_variable DeleteSynchronizationBarrier_t     win32_barrier_delete = (DeleteSynchronizationBarrier_t)legacy_barrier_delete;
+global_variable DeleteSynchronizationBarrier_t     win32_barrier_delete = legacy_barrier_delete;
 
 struct Win32_Entity
 {
@@ -378,7 +378,7 @@ struct Worker_Args
 	usize input_files_count;
 };
 
-func DWORD
+func DWORD WINAPI
 win32_worker_thread(LPVOID lp_param)
 {
 	struct Worker_Args *args = (struct Worker_Args *)lp_param;
