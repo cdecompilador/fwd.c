@@ -266,6 +266,91 @@ test_if0_block_not_emitted(void)
 	free_test_arena(&merge_arena);
 }
 
+func void
+test_apostrophe_in_block_comment_cross_lane(void)
+{
+	printf("test_apostrophe_in_block_comment_cross_lane:\n");
+
+	/* NOTE: Replicates the real bug from vulkan-drawing-app/base.c where a block
+	 * comment containing an apostrophe (the word "doen't") caused the parser to
+	 * misinterpret it as a char literal start when a lane boundary fell inside
+	 * the comment. skip_char_literal then ate everything until the next quote
+	 * much later in the file, skipping multiple function definitions. */
+	const char *source =
+		"func int\n"
+		"first_func()\n"
+		"{\n"
+		"    /* NOTE: doen't use this */\n"
+		"    return 0;\n"
+		"}\n"
+		"\n"
+		"func int\n"
+		"second_func()\n"
+		"{\n"
+		"    char c = '\\0';\n"
+		"    return c;\n"
+		"}\n"
+		"\n"
+		"func int\n"
+		"third_func()\n"
+		"{\n"
+		"    return 2;\n"
+		"}\n";
+	usize source_len = strlen(source);
+	u8 *test_buffer = (u8 *)malloc(source_len);
+	memcpy(test_buffer, source, source_len);
+
+	/* Place the split point inside the block comment, after "doen" but before
+	 * the apostrophe so lane 1 starts mid-comment and hits the ' */
+	const char *comment_start = strstr(source, "/* NOTE: doen");
+	usize comment_offset = (usize)(comment_start - source);
+	usize split_point = comment_offset + 10; /* lands inside comment, before the ' in doen't */
+
+	struct Arena lane0_arena = make_test_arena(8192);
+	struct Arena lane1_arena = make_test_arena(8192);
+
+	struct Decl *lane0_decl_first = 0, *lane0_decl_last = 0;
+	struct Marker *lane0_marker_first = 0, *lane0_marker_last = 0;
+	struct Decl *lane1_decl_first = 0, *lane1_decl_last = 0;
+	struct Marker *lane1_marker_first = 0, *lane1_marker_last = 0;
+
+	parse_file_range(test_buffer, source_len,
+			0, split_point, &lane0_arena,
+			&lane0_decl_first, &lane0_decl_last,
+			&lane0_marker_first, &lane0_marker_last);
+
+	parse_file_range(test_buffer, source_len,
+			split_point, source_len, &lane1_arena,
+			&lane1_decl_first, &lane1_decl_last,
+			&lane1_marker_first, &lane1_marker_last);
+
+	struct Decl *decl_first_per_lane[2] = { lane0_decl_first, lane1_decl_first };
+	struct Marker *marker_first_per_lane[2] = { lane0_marker_first, lane1_marker_first };
+
+	struct Arena merge_arena = make_test_arena(4096);
+	merge_and_invalidate(decl_first_per_lane, marker_first_per_lane, 2, &merge_arena);
+
+	b32 found_second = 0;
+	b32 found_third = 0;
+	for (usize lane_i = 0; lane_i < 2; lane_i++)
+	{
+		for (struct Decl *decl = decl_first_per_lane[lane_i]; decl; decl = decl->next)
+		{
+			if (!decl->valid || decl->kind != decl_func) continue;
+			if (strstr(decl->signature, "second_func")) found_second = 1;
+			if (strstr(decl->signature, "third_func"))  found_third = 1;
+		}
+	}
+
+	check(found_second, "second_func found after block comment with apostrophe across lane boundary");
+	check(found_third, "third_func found (not eaten by cascading char literal skip)");
+
+	free(test_buffer);
+	free_test_arena(&lane0_arena);
+	free_test_arena(&lane1_arena);
+	free_test_arena(&merge_arena);
+}
+
 int main(void)
 {
 	l_lane_index = 0;
@@ -274,6 +359,7 @@ int main(void)
 	test_multiline_block_comment_with_quote();
 	test_backslash_continuation_string();
 	test_if0_block_not_emitted();
+	test_apostrophe_in_block_comment_cross_lane();
 
 	printf("\n%zu/%zu unit tests passed\n",
 			g_test_pass_count, g_test_pass_count + g_test_fail_count);

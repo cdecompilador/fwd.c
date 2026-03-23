@@ -308,11 +308,11 @@ parse_file_range(u8 *files_memory, usize total_files_size,
 {
 	b32 in_string = 0;
 	b32 in_line_comment = 0;
+	b32 in_block_comment = 0;
 	{
 		/* NOTE(cdecompilador): Scan backwards to detect if we are inside a block
 		 * comment that opened on a previous line. If we find / * before * / then
 		 * quotes inside the comment must not flip in_string. */
-		b32 in_block_comment = 0;
 		{
 			usize scan = offset_start;
 			while (scan >= 2)
@@ -400,6 +400,32 @@ parse_file_range(u8 *files_memory, usize total_files_size,
 	      max(sizeof("enum"), sizeof("union"))) - 1
 	usize original_offset_end = offset_end;
 	usize scan_end = min(offset_end + longest_keyword_size, total_files_size);
+
+	/* NOTE(cdecompilador): If we start inside a block comment, skip forward to its end
+	 * before parsing anything else. Without this, comment contents (e.g. apostrophes
+	 * in words like "doen't") can be misinterpreted as character literals. */
+	if (in_block_comment)
+	{
+		usize bc = offset_start;
+		while (bc + 1 < scan_end
+				&& !(files_memory[bc] == '*' && files_memory[bc + 1] == '/'))
+			bc++;
+		if (bc + 1 < scan_end)
+		{
+			if (bc < original_offset_end)
+			{
+				struct Marker *m_close = push_struct(arena, struct Marker);
+				m_close->byte_index = bc;
+				m_close->kind = marker_comment_close;
+				queue_push(marker_first, marker_last, m_close);
+			}
+			offset_start = bc + 2;
+		}
+		else
+		{
+			offset_start = scan_end;
+		}
+	}
 
 	for (usize byte_index = offset_start;
 		 byte_index < scan_end;
